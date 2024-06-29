@@ -1,4 +1,5 @@
-﻿using MiniExcelLibs.Utils;
+﻿using MiniExcelLibs.OpenXml.Constants;
+using MiniExcelLibs.Utils;
 using MiniExcelLibs.Zip;
 using System;
 using System.Collections;
@@ -18,52 +19,13 @@ namespace MiniExcelLibs.OpenXml
         {
             await GenerateDefaultOpenXmlAsync(cancellationToken);
 
-            switch (_value)
+            var sheets = GetSheets();
+
+            foreach (var sheet in sheets)
             {
-                case IDictionary<string, object> sheets:
-                    {
-                        var sheetId = 0;
-                        _sheets.RemoveAt(0);//TODO:remove
-                        foreach (var sheet in sheets)
-                        {
-                            sheetId++;
-                            var sheetInfos = GetSheetInfos(sheet.Key);
-                            var sheetDto = sheetInfos.ToDto(sheetId);
-                            _sheets.Add(sheetDto); //TODO:remove
-
-                            currentSheetIndex = sheetId;
-
-                            await CreateSheetXmlAsync(sheet.Value, sheetDto.Path, cancellationToken);
-                        }
-
-                        break;
-                    }
-
-                case DataSet sheets:
-                    {
-                        var sheetId = 0;
-                        _sheets.RemoveAt(0);//TODO:remove
-                        foreach (DataTable dt in sheets.Tables)
-                        {
-                            sheetId++;
-                            var sheetInfos = GetSheetInfos(dt.TableName);
-                            var sheetDto = sheetInfos.ToDto(sheetId);
-                            _sheets.Add(sheetDto); //TODO:remove
-
-                            currentSheetIndex = sheetId;
-
-                            await CreateSheetXmlAsync(dt, sheetDto.Path, cancellationToken);
-                        }
-
-                        break;
-                    }
-
-                default:
-                    //Single sheet export.
-                    currentSheetIndex++;
-
-                    await CreateSheetXmlAsync(_value, _sheets[0].Path, cancellationToken);
-                    break;
+                _sheets.Add(sheet.Item1); //TODO:remove
+                currentSheetIndex = sheet.Item1.SheetIdx;
+                await CreateSheetXmlAsync(sheet.Item2, sheet.Item1.Path, cancellationToken);
             }
 
             await GenerateEndXmlAsync(cancellationToken);
@@ -72,25 +34,9 @@ namespace MiniExcelLibs.OpenXml
 
         internal async Task GenerateDefaultOpenXmlAsync(CancellationToken cancellationToken)
         {
-            await CreateZipEntryAsync("_rels/.rels", "application/vnd.openxmlformats-package.relationships+xml", ExcelOpenXmlSheetWriter._defaultRels, cancellationToken);
-            await CreateZipEntryAsync("xl/sharedStrings.xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml", ExcelOpenXmlSheetWriter._defaultSharedString, cancellationToken);
-        }
-
-        private async Task CreateZipEntryAsync(string path, string contentType, string content, CancellationToken cancellationToken)
-        {
-            ZipArchiveEntry entry = _archive.CreateEntry(path, CompressionLevel.Fastest);
-            using (var zipStream = entry.Open())
-            using (MiniExcelAsyncStreamWriter writer = new MiniExcelAsyncStreamWriter(zipStream, _utf8WithBom, _configuration.BufferSize, cancellationToken))
-                await writer.WriteAsync(content);
-            if (!string.IsNullOrEmpty(contentType))
-                _zipDictionary.Add(path, new ZipPackageInfo(entry, contentType));
-        }
-
-        private async Task CreateZipEntryAsync(string path, byte[] content, CancellationToken cancellationToken)
-        {
-            ZipArchiveEntry entry = _archive.CreateEntry(path, CompressionLevel.Fastest);
-            using (var zipStream = entry.Open())
-                await zipStream.WriteAsync(content, 0, content.Length, cancellationToken);
+            await CreateZipEntryAsync(ExcelFileNames.Rels, ExcelContentTypes.Relationships, ExcelXml.DefaultRels, cancellationToken);
+            await CreateZipEntryAsync(ExcelFileNames.SharedStrings, ExcelContentTypes.SharedStrings, ExcelXml.DefaultSharedString, cancellationToken);
+            await GenerateStylesXmlAsync(cancellationToken);
         }
 
         private async Task CreateSheetXmlAsync(object value, string sheetPath, CancellationToken cancellationToken)
@@ -102,49 +48,47 @@ namespace MiniExcelLibs.OpenXml
                 if (value == null)
                 {
                     await WriteEmptySheetAsync(writer);
-                    goto End; //for re-using code
                 }
-
-                //DapperRow
-
-                switch (value)
+                else
                 {
-                    case IDataReader dataReader:
-                        await GenerateSheetByIDataReaderAsync(writer, dataReader);
-                        break;
-                    case IEnumerable enumerable:
-                        await GenerateSheetByEnumerableAsync(writer, enumerable);
-                        break;
-                    case DataTable dataTable:
-                        await GenerateSheetByDataTableAsync(writer, dataTable);
-                        break;
-                    default:
-                        throw new NotImplementedException($"Type {value.GetType().FullName} is not implemented. Please open an issue.");
+                    //DapperRow
+
+                    switch (value)
+                    {
+                        case IDataReader dataReader:
+                            await GenerateSheetByIDataReaderAsync(writer, dataReader);
+                            break;
+                        case IEnumerable enumerable:
+                            await GenerateSheetByEnumerableAsync(writer, enumerable);
+                            break;
+                        case DataTable dataTable:
+                            await GenerateSheetByDataTableAsync(writer, dataTable);
+                            break;
+                        default:
+                            throw new NotImplementedException($"Type {value.GetType().FullName} is not implemented. Please open an issue.");
+                    }
                 }
             }
-        End: //for re-using code
-            _zipDictionary.Add(sheetPath, new ZipPackageInfo(entry, "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"));
+            _zipDictionary.Add(sheetPath, new ZipPackageInfo(entry, ExcelContentTypes.Worksheet));
         }
 
         private async Task WriteEmptySheetAsync(MiniExcelAsyncStreamWriter writer)
         {
-            await writer.WriteAsync($@"<?xml version=""1.0"" encoding=""utf-8""?><x:worksheet xmlns:x=""http://schemas.openxmlformats.org/spreadsheetml/2006/main""><x:dimension ref=""A1""/><x:sheetData></x:sheetData></x:worksheet>");
+            await writer.WriteAsync(ExcelXml.EmptySheetXml);
         }
 
         private async Task GenerateSheetByIDataReaderAsync(MiniExcelAsyncStreamWriter writer, IDataReader reader)
         {
             long dimensionWritePosition = 0;
-            await writer.WriteAsync($@"<?xml version=""1.0"" encoding=""utf-8""?><x:worksheet xmlns:x=""http://schemas.openxmlformats.org/spreadsheetml/2006/main"">");
-            var xIndex = 1;
+            await writer.WriteAsync(WorksheetXml.StartWorksheet);
             var yIndex = 1;
-            var maxColumnIndex = 0;
-            var maxRowIndex = 0;
+            int maxColumnIndex;
+            int maxRowIndex;
             {
-
                 if (_configuration.FastMode)
                 {
-                    dimensionWritePosition = await writer.WriteAndFlushAsync($@"<x:dimension ref=""");
-                    await writer.WriteAsync("                              />"); // end of code will be replaced
+                    dimensionWritePosition = await writer.WriteAndFlushAsync(WorksheetXml.StartDimension);
+                    await writer.WriteAsync(WorksheetXml.DimensionPlaceholder); // end of code will be replaced
                 }
 
                 var props = new List<ExcelColumnInfo>();
@@ -158,7 +102,7 @@ namespace MiniExcelLibs.OpenXml
 
                 await WriteColumnsWidthsAsync(writer, props);
 
-                await writer.WriteAsync("<x:sheetData>");
+                await writer.WriteAsync(WorksheetXml.StartSheetData);
                 int fieldCount = reader.FieldCount;
                 if (_printHeader)
                 {
@@ -168,15 +112,15 @@ namespace MiniExcelLibs.OpenXml
 
                 while (reader.Read())
                 {
-                    await writer.WriteAsync($"<x:row r=\"{yIndex}\">");
-                    xIndex = 1;
+                    await writer.WriteAsync(WorksheetXml.StartRow(yIndex));
+                    var xIndex = 1;
                     for (int i = 0; i < fieldCount; i++)
                     {
                         var cellValue = reader.GetValue(i);
-                        await WriteCellAsync(writer, yIndex, xIndex, cellValue, null);
+                        await WriteCellAsync(writer, yIndex, xIndex, cellValue, props[i]);
                         xIndex++;
                     }
-                    await writer.WriteAsync($"</x:row>");
+                    await writer.WriteAsync(WorksheetXml.EndRow);
                     yIndex++;
                 }
 
@@ -184,10 +128,14 @@ namespace MiniExcelLibs.OpenXml
                 maxRowIndex = yIndex - 1;
             }
 
-            await writer.WriteAsync("</x:sheetData>");
+            await writer.WriteAsync(WorksheetXml.EndSheetData);
+
             if (_configuration.AutoFilter)
-                await writer.WriteAsync($"<x:autoFilter ref=\"{GetDimensionRef(maxRowIndex, maxColumnIndex)}\" />");
-            await writer.WriteAndFlushAsync("</x:worksheet>");
+            {
+                await writer.WriteAsync(WorksheetXml.Autofilter(GetDimensionRef(maxRowIndex, maxColumnIndex)));
+            }
+
+            await writer.WriteAndFlushAsync(WorksheetXml.EndWorksheet);
 
             if (_configuration.FastMode)
             {
@@ -244,13 +192,13 @@ namespace MiniExcelLibs.OpenXml
                 if (firstItem is IDictionary<string, object> genericDic)
                 {
                     mode = "IDictionary<string, object>";
-                    props = GetDictionaryColumnInfo(genericDic, null);
+                    props = CustomPropertyHelper.GetDictionaryColumnInfo(genericDic, null, _configuration);
                     maxColumnIndex = props.Count;
                 }
                 else if (firstItem is IDictionary dic)
                 {
                     mode = "IDictionary";
-                    props = GetDictionaryColumnInfo(null, dic);
+                    props = CustomPropertyHelper.GetDictionaryColumnInfo(null, dic, _configuration);
                     //maxColumnIndex = dic.Keys.Count;
                     maxColumnIndex = props.Count; // why not using keys, because ignore attribute ![image](https://user-images.githubusercontent.com/12729184/163686902-286abb70-877b-4e84-bd3b-001ad339a84a.png)
                 }
@@ -260,7 +208,7 @@ namespace MiniExcelLibs.OpenXml
                 }
             }
 
-            await writer.WriteAsync($@"<?xml version=""1.0"" encoding=""utf-8""?><x:worksheet xmlns:r=""http://schemas.openxmlformats.org/officeDocument/2006/relationships"" xmlns:x=""http://schemas.openxmlformats.org/spreadsheetml/2006/main"" >");
+            await writer.WriteAsync(WorksheetXml.StartWorksheetWithRelationship);
 
             long dimensionWritePosition = 0;
 
@@ -268,20 +216,20 @@ namespace MiniExcelLibs.OpenXml
             if (_configuration.FastMode && rowCount == null)
             {
                 // Write a placeholder for the table dimensions and save thee position for later
-                dimensionWritePosition = await writer.WriteAndFlushAsync("<x:dimension ref=\"");
-                await writer.WriteAsync("                              />");
+                dimensionWritePosition = await writer.WriteAndFlushAsync(WorksheetXml.StartDimension);
+                await writer.WriteAsync(WorksheetXml.DimensionPlaceholder);
             }
             else
             {
                 maxRowIndex = rowCount.Value + (_printHeader && rowCount > 0 ? 1 : 0);
-                await writer.WriteAsync($@"<x:dimension ref=""{GetDimensionRef(maxRowIndex, maxColumnIndex)}""/>");
+                await writer.WriteAsync(WorksheetXml.Dimension(GetDimensionRef(maxRowIndex, maxColumnIndex)));
             }
 
             //cols:width
             await WriteColumnsWidthsAsync(writer, props);
 
             //header
-            await writer.WriteAsync($@"<x:sheetData>");
+            await writer.WriteAsync(WorksheetXml.StartSheetData);
             var yIndex = 1;
             var xIndex = 1;
             if (_printHeader)
@@ -293,9 +241,9 @@ namespace MiniExcelLibs.OpenXml
             if (!empty)
             {
                 // body
-                switch (mode) //Dapper Row
+                switch (mode)
                 {
-                    case "IDictionary<string, object>":
+                    case "IDictionary<string, object>": //Dapper Row
                         maxRowIndex = await GenerateSheetByColumnInfoAsync<IDictionary<string, object>>(writer, enumerator, props, xIndex, yIndex);
                         break;
                     case "IDictionary":
@@ -309,103 +257,110 @@ namespace MiniExcelLibs.OpenXml
                 }
             }
 
-            await writer.WriteAsync("</x:sheetData>");
+            await writer.WriteAsync(WorksheetXml.EndSheetData);
             if (_configuration.AutoFilter)
-                await writer.WriteAsync($"<x:autoFilter ref=\"{GetDimensionRef(maxRowIndex, maxColumnIndex)}\" />");
+            {
+                await writer.WriteAsync(WorksheetXml.Autofilter(GetDimensionRef(maxRowIndex, maxColumnIndex)));
+            }
+
+            await writer.WriteAsync(WorksheetXml.Drawing(currentSheetIndex));
+            await writer.WriteAsync(WorksheetXml.EndWorksheet);
 
             // The dimension has already been written if row count is defined
             if (_configuration.FastMode && rowCount == null)
             {
-                // Flush and save position so that we can get back again.
-                var pos = await writer.FlushAsync();
-
                 // Seek back and write the dimensions of the table
                 writer.SetPosition(dimensionWritePosition);
                 await writer.WriteAndFlushAsync($@"{GetDimensionRef(maxRowIndex, maxColumnIndex)}""");
-                writer.SetPosition(pos);
             }
-
-            await writer.WriteAsync("<x:drawing  r:id=\"drawing" + currentSheetIndex + "\" /></x:worksheet>");
         }
 
         private async Task GenerateSheetByDataTableAsync(MiniExcelAsyncStreamWriter writer, DataTable value)
         {
             var xy = ExcelOpenXmlUtils.ConvertCellToXY("A1");
 
-            //GOTO Top Write:
-            await writer.WriteAsync($@"<?xml version=""1.0"" encoding=""utf-8""?><x:worksheet xmlns:x=""http://schemas.openxmlformats.org/spreadsheetml/2006/main"">");
+            await writer.WriteAsync(WorksheetXml.StartWorksheet);
+            var yIndex = xy.Item2;
+
+            // dimension
+            var maxRowIndex = value.Rows.Count + (_printHeader && value.Rows.Count > 0 ? 1 : 0);
+            var maxColumnIndex = value.Columns.Count;
+            await writer.WriteAsync(WorksheetXml.Dimension(GetDimensionRef(maxRowIndex, maxColumnIndex)));
+
+            var props = new List<ExcelColumnInfo>();
+            for (var i = 0; i < value.Columns.Count; i++)
             {
-                var yIndex = xy.Item2;
-
-                // dimension
-                var maxRowIndex = value.Rows.Count + (_printHeader && value.Rows.Count > 0 ? 1 : 0);
-                var maxColumnIndex = value.Columns.Count;
-                await writer.WriteAsync($@"<x:dimension ref=""{GetDimensionRef(maxRowIndex, maxColumnIndex)}""/>");
-
-                var props = new List<ExcelColumnInfo>();
-                for (var i = 0; i < value.Columns.Count; i++)
-                {
-                    var columnName = value.Columns[i].Caption ?? value.Columns[i].ColumnName;
-                    var prop = GetColumnInfosFromDynamicConfiguration(columnName);
-                    props.Add(prop);
-                }
-
-                await WriteColumnsWidthsAsync(writer, props);
-
-                await writer.WriteAsync("<x:sheetData>");
-                if (_printHeader)
-                {
-                    await writer.WriteAsync($"<x:row r=\"{yIndex}\">");
-                    var xIndex = xy.Item1;
-                    foreach (var p in props)
-                    {
-                        var r = ExcelOpenXmlUtils.ConvertXyToCell(xIndex, yIndex);
-                        await WriteCAsync(writer, r, columnName: p.ExcelColumnName);
-                        xIndex++;
-                    }
-
-                    await writer.WriteAsync($"</x:row>");
-                    yIndex++;
-                }
-
-                for (int i = 0; i < value.Rows.Count; i++)
-                {
-                    await writer.WriteAsync($"<x:row r=\"{yIndex}\">");
-                    var xIndex = xy.Item1;
-
-                    for (int j = 0; j < value.Columns.Count; j++)
-                    {
-                        var cellValue = value.Rows[i][j];
-                        await WriteCellAsync(writer, yIndex, xIndex, cellValue, null);
-                        xIndex++;
-                    }
-                    await writer.WriteAsync($"</x:row>");
-                    yIndex++;
-                }
+                var columnName = value.Columns[i].Caption ?? value.Columns[i].ColumnName;
+                var prop = GetColumnInfosFromDynamicConfiguration(columnName);
+                props.Add(prop);
             }
-            await writer.WriteAsync("</x:sheetData></x:worksheet>");
+
+            await WriteColumnsWidthsAsync(writer, props);
+
+            await writer.WriteAsync(WorksheetXml.StartSheetData);
+            if (_printHeader)
+            {
+                await writer.WriteAsync(WorksheetXml.StartRow(yIndex));
+                var xIndex = xy.Item1;
+                foreach (var p in props)
+                {
+                    var r = ExcelOpenXmlUtils.ConvertXyToCell(xIndex, yIndex);
+                    await WriteCellAsync(writer, r, columnName: p.ExcelColumnName);
+                    xIndex++;
+                }
+
+                await writer.WriteAsync(WorksheetXml.EndRow);
+                yIndex++;
+            }
+
+            for (int i = 0; i < value.Rows.Count; i++)
+            {
+                await writer.WriteAsync(WorksheetXml.StartRow(yIndex));
+                var xIndex = xy.Item1;
+
+                for (int j = 0; j < value.Columns.Count; j++)
+                {
+                    var cellValue = value.Rows[i][j];
+                    await WriteCellAsync(writer, yIndex, xIndex, cellValue, props[j]);
+                    xIndex++;
+                }
+                await writer.WriteAsync(WorksheetXml.EndRow);
+                yIndex++;
+            }
+
+            await writer.WriteAsync(WorksheetXml.EndSheetData);
+
+            if (_configuration.AutoFilter)
+            {
+                await writer.WriteAsync(WorksheetXml.Autofilter(GetDimensionRef(maxRowIndex, maxColumnIndex)));
+            }
+
+            await writer.WriteAsync(WorksheetXml.EndWorksheet);
         }
 
         private static async Task WriteColumnsWidthsAsync(MiniExcelAsyncStreamWriter writer, IEnumerable<ExcelColumnInfo> props)
         {
             var ecwProps = props.Where(x => x?.ExcelColumnWidth != null).ToList();
             if (ecwProps.Count <= 0)
-                return;
-            await writer.WriteAsync($@"<x:cols>");
-            foreach (var p in ecwProps)
             {
-                await writer.WriteAsync(
-                    $@"<x:col min=""{p.ExcelColumnIndex + 1}"" max=""{p.ExcelColumnIndex + 1}"" width=""{p.ExcelColumnWidth}"" customWidth=""1"" />");
+                return;
             }
 
-            await writer.WriteAsync($@"</x:cols>");
+            await writer.WriteAsync(WorksheetXml.StartCols);
+
+            foreach (var p in ecwProps)
+            {
+                await writer.WriteAsync(WorksheetXml.Column(p.ExcelColumnIndex, p.ExcelColumnWidth));
+            }
+
+            await writer.WriteAsync(WorksheetXml.EndCols);
         }
 
         private static async Task PrintHeaderAsync(MiniExcelAsyncStreamWriter writer, List<ExcelColumnInfo> props)
         {
             var xIndex = 1;
             var yIndex = 1;
-            await writer.WriteAsync($"<x:row r=\"{yIndex}\">");
+            await writer.WriteAsync(WorksheetXml.StartRow(yIndex));
 
             foreach (var p in props)
             {
@@ -416,44 +371,11 @@ namespace MiniExcelLibs.OpenXml
                 }
 
                 var r = ExcelOpenXmlUtils.ConvertXyToCell(xIndex, yIndex);
-                WriteCAsync(writer, r, columnName: p.ExcelColumnName);
+                await WriteCellAsync(writer, r, columnName: p.ExcelColumnName);
                 xIndex++;
             }
 
-            await writer.WriteAsync("</x:row>");
-        }
-
-        private static async Task WriteCAsync(MiniExcelAsyncStreamWriter writer, string r, string columnName)
-        {
-            await writer.WriteAsync($"<x:c r=\"{r}\" t=\"str\" s=\"1\">");
-            await writer.WriteAsync($"<x:v>{ExcelOpenXmlUtils.EncodeXML(columnName)}"); //issue I45TF5
-            await writer.WriteAsync($"</x:v>");
-            await writer.WriteAsync($"</x:c>");
-        }
-
-        private async Task WriteCellAsync(MiniExcelAsyncStreamWriter writer, int rowIndex, int cellIndex, object value, ExcelColumnInfo p)
-        {
-            var columname = ExcelOpenXmlUtils.ConvertXyToCell(cellIndex, rowIndex);
-            var s = "2";
-            var valueIsNull = value is null || value is DBNull;
-
-            if (_configuration.EnableWriteNullValueCell && valueIsNull)
-            {
-                await writer.WriteAsync($"<x:c r=\"{columname}\" s=\"{s}\"></x:c>");
-                return;
-            }
-
-            var tuple = GetCellValue(rowIndex, cellIndex, value, p, valueIsNull);
-
-            s = tuple.Item1;
-            var t = tuple.Item2;
-            var v = tuple.Item3;
-
-            if (v != null && (v.StartsWith(" ", StringComparison.Ordinal) || v.EndsWith(" ", StringComparison.Ordinal))) /*Prefix and suffix blank space will lost after SaveAs #294*/
-                await writer.WriteAsync($"<x:c r=\"{columname}\" {(t == null ? "" : $"t =\"{t}\"")} s=\"{s}\" xml:space=\"preserve\"><x:v>{v}</x:v></x:c>");
-            else
-                //t check avoid format error ![image](https://user-images.githubusercontent.com/12729184/118770190-9eee3480-b8b3-11eb-9f5a-87a439f5e320.png)
-                await writer.WriteAsync($"<x:c r=\"{columname}\" {(t == null ? "" : $"t =\"{t}\"")} s=\"{s}\"><x:v>{v}</x:v></x:c>");
+            await writer.WriteAsync(WorksheetXml.EndRow);
         }
 
         private async Task<int> GenerateSheetByColumnInfoAsync<T>(MiniExcelAsyncStreamWriter writer, IEnumerator value, List<ExcelColumnInfo> props, int xIndex = 1, int yIndex = 1)
@@ -465,7 +387,7 @@ namespace MiniExcelLibs.OpenXml
                 // The enumerator has already moved to the first item
                 T v = (T)value.Current;
 
-                await writer.WriteAsync($"<x:row r=\"{yIndex}\">");
+                await writer.WriteAsync(WorksheetXml.StartRow(yIndex));
                 var cellIndex = xIndex;
                 foreach (var p in props)
                 {
@@ -474,6 +396,7 @@ namespace MiniExcelLibs.OpenXml
                         cellIndex++;
                         continue;
                     }
+
                     object cellValue = null;
                     if (isDic)
                     {
@@ -489,146 +412,164 @@ namespace MiniExcelLibs.OpenXml
                     {
                         cellValue = p.Property.GetValue(v);
                     }
-                    await WriteCellAsync(writer, yIndex, cellIndex, cellValue, p);
 
+                    await WriteCellAsync(writer, yIndex, cellIndex, cellValue, p);
 
                     cellIndex++;
                 }
-                await writer.WriteAsync($"</x:row>");
+
+                await writer.WriteAsync(WorksheetXml.EndRow);
                 yIndex++;
             } while (value.MoveNext());
 
             return yIndex - 1;
         }
 
+        private static async Task WriteCellAsync(MiniExcelAsyncStreamWriter writer, string cellReference, string columnName)
+        {
+            await writer.WriteAsync(WorksheetXml.Cell(cellReference, "str", "1", ExcelOpenXmlUtils.EncodeXML(columnName)));
+        }
+
+        private async Task WriteCellAsync(MiniExcelAsyncStreamWriter writer, int rowIndex, int cellIndex, object value, ExcelColumnInfo p)
+        {
+            var columnReference = ExcelOpenXmlUtils.ConvertXyToCell(cellIndex, rowIndex);
+            var valueIsNull = value is null || value is DBNull;
+
+            if (_configuration.EnableWriteNullValueCell && valueIsNull)
+            {
+                await writer.WriteAsync(WorksheetXml.EmptyCell(columnReference, "2"));
+                return;
+            }
+
+            var tuple = GetCellValue(rowIndex, cellIndex, value, p, valueIsNull);
+
+            var styleIndex = tuple.Item1;
+            var dataType = tuple.Item2;
+            var cellValue = tuple.Item3;
+
+            /*Prefix and suffix blank space will lost after SaveAs #294*/
+            var preserveSpace = cellValue != null && (cellValue.StartsWith(" ", StringComparison.Ordinal) || cellValue.EndsWith(" ", StringComparison.Ordinal));
+            await writer.WriteAsync(WorksheetXml.Cell(columnReference, dataType, styleIndex, cellValue, preserveSpace: preserveSpace));
+        }
+
         private async Task GenerateEndXmlAsync(CancellationToken cancellationToken)
         {
-            //Files
+            await AddFilesToZipAsync(cancellationToken);
+
+            await GenerateDrawinRelXmlAsync(cancellationToken);
+
+            await GenerateDrawingXmlAsync(cancellationToken);
+
+            await GenerateWorkbookXmlAsync(cancellationToken);
+
+            await GenerateContentTypesXmlAsync(cancellationToken);
+        }
+
+        private async Task AddFilesToZipAsync(CancellationToken cancellationToken)
+        {
+            foreach (var item in _files)
             {
-                foreach (var item in _files)
-                {
-                    await this.CreateZipEntryAsync(item.Path, item.Byte, cancellationToken);
-                }
+                await this.CreateZipEntryAsync(item.Path, item.Byte, cancellationToken);
+            }
+        }
+
+        /// <summary>
+        /// styles.xml
+        /// </summary>
+        private async Task GenerateStylesXmlAsync(CancellationToken cancellationToken)
+        {
+            var styleXml = GetStylesXml(_configuration.DynamicColumns);
+
+            await CreateZipEntryAsync(
+                ExcelFileNames.Styles,
+                ExcelContentTypes.Styles,
+                styleXml,
+                cancellationToken);
+        }
+
+        private async Task GenerateDrawinRelXmlAsync(CancellationToken cancellationToken)
+        {
+            for (int sheetIndex = 0; sheetIndex < _sheets.Count; sheetIndex++)
+            {
+                var drawing = GetDrawingRelationshipXml(sheetIndex);
+                await CreateZipEntryAsync(
+                    ExcelFileNames.DrawingRels(sheetIndex),
+                    string.Empty,
+                    ExcelXml.DefaultDrawingXmlRels.Replace("{{format}}", drawing),
+                    cancellationToken);
+            }
+        }
+
+        private async Task GenerateDrawingXmlAsync(CancellationToken cancellationToken)
+        {
+            for (int sheetIndex = 0; sheetIndex < _sheets.Count; sheetIndex++)
+            {
+                var drawing = GetDrawingXml(sheetIndex);
+                await CreateZipEntryAsync(
+                    ExcelFileNames.Drawing(sheetIndex),
+                    ExcelContentTypes.Drawing,
+                    ExcelXml.DefaultDrawing.Replace("{{format}}", drawing),
+                    cancellationToken);
+            }
+        }
+
+        /// <summary>
+        /// workbook.xml 、 workbookRelsXml
+        /// </summary>
+        private async Task GenerateWorkbookXmlAsync(CancellationToken cancellationToken)
+        {
+            GenerateWorkBookXmls(
+                out StringBuilder workbookXml,
+                out StringBuilder workbookRelsXml,
+                out Dictionary<int, string> sheetsRelsXml);
+
+            foreach (var sheetRelsXml in sheetsRelsXml)
+            {
+                await CreateZipEntryAsync(
+                    ExcelFileNames.SheetRels(sheetRelsXml.Key),
+                    null,
+                    ExcelXml.DefaultSheetRelXml.Replace("{{format}}", sheetRelsXml.Value),
+                    cancellationToken);
             }
 
-            // styles.xml
-            {
-                var styleXml = string.Empty;
+            await CreateZipEntryAsync(
+                ExcelFileNames.Workbook,
+                ExcelContentTypes.Workbook,
+                ExcelXml.DefaultWorkbookXml.Replace("{{sheets}}", workbookXml.ToString()),
+                    cancellationToken);
 
-                if (_configuration.TableStyles == TableStyles.None)
-                {
-                    styleXml = _noneStylesXml;
-                }
-                else if (_configuration.TableStyles == TableStyles.Default)
-                {
-                    styleXml = _defaultStylesXml;
-                }
+            await CreateZipEntryAsync(
+                ExcelFileNames.WorkbookRels,
+                null,
+                ExcelXml.DefaultWorkbookXmlRels.Replace("{{sheets}}", workbookRelsXml.ToString()),
+                    cancellationToken);
+        }
 
-                await CreateZipEntryAsync(@"xl/styles.xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml", styleXml, cancellationToken);
-            }
+        /// <summary>
+        /// [Content_Types].xml
+        /// </summary>
+        private async Task GenerateContentTypesXmlAsync(CancellationToken cancellationToken)
+        {
+            var contentTypes = GetContentTypesXml();
 
-            // drawing rel
-            {
-                for (int j = 0; j < _sheets.Count; j++)
-                {
-                    var drawing = new StringBuilder();
-                    foreach (var i in _files.Where(w => w.IsImage && w.SheetId == j + 1))
-                    {
-                        drawing.AppendLine($@"<Relationship Type=""http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"" Target=""{i.Path2}"" Id=""{i.ID}"" />");
-                    }
-                    await CreateZipEntryAsync($"xl/drawings/_rels/drawing{j + 1}.xml.rels", "",
-                        _defaultDrawingXmlRels.Replace("{{format}}", drawing.ToString()), cancellationToken);
-                }
+            await CreateZipEntryAsync(ExcelFileNames.ContentTypes, null, contentTypes, cancellationToken);
+        }
 
-            }
-            // drawing
-            {
-                for (int j = 0; j < _sheets.Count; j++)
-                {
-                    var drawing = new StringBuilder();
-                    foreach (var i in _files.Where(w => w.IsImage && w.SheetId == j + 1))
-                    {
-                        drawing.Append($@"<xdr:oneCellAnchor>
-        <xdr:from>
-            <xdr:col>{i.CellIndex - 1/* why -1 : https://user-images.githubusercontent.com/12729184/150460189-f08ed939-44d4-44e1-be6e-9c533ece6be8.png*/}</xdr:col>
-            <xdr:colOff>0</xdr:colOff>
-            <xdr:row>{i.RowIndex - 1}</xdr:row>
-            <xdr:rowOff>0</xdr:rowOff>
-        </xdr:from>
-        <xdr:ext cx=""609600"" cy=""190500"" />
-        <xdr:pic>
-            <xdr:nvPicPr>
-                <xdr:cNvPr id=""{_files.IndexOf(i) + 1}"" descr="""" name=""2a3f9147-58ea-4a79-87da-7d6114c4877b"" />
-                <xdr:cNvPicPr>
-                    <a:picLocks noChangeAspect=""1"" />
-                </xdr:cNvPicPr>
-            </xdr:nvPicPr>
-            <xdr:blipFill>
-                <a:blip r:embed=""{i.ID}"" cstate=""print"" />
-                <a:stretch>
-                    <a:fillRect />
-                </a:stretch>
-            </xdr:blipFill>
-            <xdr:spPr>
-                <a:xfrm>
-                    <a:off x=""0"" y=""0"" />
-                    <a:ext cx=""0"" cy=""0"" />
-                </a:xfrm>
-                <a:prstGeom prst=""rect"">
-                    <a:avLst />
-                </a:prstGeom>
-            </xdr:spPr>
-        </xdr:pic>
-        <xdr:clientData />
-    </xdr:oneCellAnchor>");
-                    }
-                    await CreateZipEntryAsync($"xl/drawings/drawing{j + 1}.xml", "application/vnd.openxmlformats-officedocument.drawing+xml",
-                        _defaultDrawing.Replace("{{format}}", drawing.ToString()), cancellationToken);
-                }
-            }
+        private async Task CreateZipEntryAsync(string path, string contentType, string content, CancellationToken cancellationToken)
+        {
+            ZipArchiveEntry entry = _archive.CreateEntry(path, CompressionLevel.Fastest);
+            using (var zipStream = entry.Open())
+            using (MiniExcelAsyncStreamWriter writer = new MiniExcelAsyncStreamWriter(zipStream, _utf8WithBom, _configuration.BufferSize, cancellationToken))
+                await writer.WriteAsync(content);
+            if (!string.IsNullOrEmpty(contentType))
+                _zipDictionary.Add(path, new ZipPackageInfo(entry, contentType));
+        }
 
-            // workbook.xml 、 workbookRelsXml
-            {
-                var workbookXml = new StringBuilder();
-                var workbookRelsXml = new StringBuilder();
-
-                var sheetId = 0;
-                foreach (var s in _sheets)
-                {
-                    sheetId++;
-                    if (string.IsNullOrEmpty(s.State))
-                    {
-                        workbookXml.AppendLine($@"<x:sheet name=""{s.Name}"" sheetId=""{sheetId}"" r:id=""{s.ID}"" />");
-                    }
-                    else
-                    {
-                        workbookXml.AppendLine($@"<x:sheet name=""{s.Name}"" sheetId=""{sheetId}"" state=""{s.State}"" r:id=""{s.ID}"" />");
-                    }
-                    workbookRelsXml.AppendLine($@"<Relationship Type=""http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"" Target=""/{s.Path}"" Id=""{s.ID}"" />");
-
-                    //TODO: support multiple drawing
-                    //TODO: ../drawings/drawing1.xml or /xl/drawings/drawing1.xml
-                    var sheetRelsXml = $@"<Relationship Type=""http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"" Target=""../drawings/drawing{sheetId}.xml"" Id=""drawing{sheetId}"" />";
-                    await CreateZipEntryAsync($"xl/worksheets/_rels/sheet{s.SheetIdx}.xml.rels", "",
-                        _defaultSheetRelXml.Replace("{{format}}", sheetRelsXml), cancellationToken);
-                }
-                await CreateZipEntryAsync(@"xl/workbook.xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
-                    _defaultWorkbookXml.Replace("{{sheets}}", workbookXml.ToString()), cancellationToken);
-                await CreateZipEntryAsync(@"xl/_rels/workbook.xml.rels", "",
-                    _defaultWorkbookXmlRels.Replace("{{sheets}}", workbookRelsXml.ToString()), cancellationToken);
-            }
-
-            //[Content_Types].xml
-            {
-                var sb = new StringBuilder(@"<?xml version=""1.0"" encoding=""UTF-8"" standalone=""yes""?><Types xmlns=""http://schemas.openxmlformats.org/package/2006/content-types""><Default ContentType=""application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings"" Extension=""bin""/><Default ContentType=""application/xml"" Extension=""xml""/><Default ContentType=""image/jpeg"" Extension=""jpg""/><Default ContentType=""image/png"" Extension=""png""/><Default ContentType=""image/gif"" Extension=""gif""/><Default ContentType=""application/vnd.openxmlformats-package.relationships+xml"" Extension=""rels""/>");
-                foreach (var p in _zipDictionary)
-                    sb.Append($"<Override ContentType=\"{p.Value.ContentType}\" PartName=\"/{p.Key}\" />");
-                sb.Append("</Types>");
-                ZipArchiveEntry entry = _archive.CreateEntry("[Content_Types].xml", CompressionLevel.Fastest);
-                using (var zipStream = entry.Open())
-                using (MiniExcelStreamWriter writer = new MiniExcelStreamWriter(zipStream, _utf8WithBom, _configuration.BufferSize))
-                    writer.Write(sb.ToString());
-            }
+        private async Task CreateZipEntryAsync(string path, byte[] content, CancellationToken cancellationToken)
+        {
+            ZipArchiveEntry entry = _archive.CreateEntry(path, CompressionLevel.Fastest);
+            using (var zipStream = entry.Open())
+                await zipStream.WriteAsync(content, 0, content.Length, cancellationToken);
         }
     }
 }
